@@ -14,14 +14,17 @@ type TPQRequestItem struct {
 }
 
 type TPQRequest struct {
-	ID          string `gorm:"primaryKey"`
-	Status      string
-	CreatedAt   time.Time
-	CreatorID   uint
-	FormedAt    *time.Time
-	CompletedAt *time.Time
-	ModeratorID *uint
-	Excavation  string
-	Result      *int             `json:"result"` // Изменено на *int для nullable (пустое значение)
-	TPQItems    []TPQRequestItem `json:"-" gorm:"foreignKey:RequestID"`
+	ID          string           `gorm:"primaryKey" json:"id"`
+	Status      string           `gorm:"index" json:"status"`
+	CreatedAt   time.Time        `json:"created_at"`
+	CreatorID   uint             `json:"creator_id"`
+	FormedAt    *time.Time       `json:"formed_at,omitempty"`
+	CompletedAt *time.Time       `json:"completed_at,omitempty"`
+	ModeratorID *uint            `json:"moderator_id,omitempty"`
+	Excavation  string           `json:"excavation"`
+	Result      *int             `json:"result,omitempty"`
+	TPQItems    []TPQRequestItem `gorm:"foreignKey:RequestID" json:"items"`
+
+	ModerationStatus string     `gorm:"default:''" json:"moderation_status"`
+	ModeratedAt      *time.Time `json:"moderated_at,omitempty"`
 }

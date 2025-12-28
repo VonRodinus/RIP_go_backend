@@ -3,127 +3,193 @@ package main
 import (
 	"RIP/internal/db"
 	"RIP/internal/handlers"
+	"RIP/internal/session"
 	"log"
 	"net/http"
 	"strings"
 
-	_ "RIP/docs" // Import generated docs
+	_ "RIP/docs"
 
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
-// @title Chronus API
-// @version 1.0
-// @description API for managing artifacts and TPQ requests.
-// @host localhost:8080
-// @BasePath /
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
 
-// @securityDefinitions.apikey BearerAuth
-// @in header
-// @name Authorization
+		allowedOrigins := []string{
+			"https://tauri.localhost",
+			"http://tauri.localhost",
+			"http://localhost:3000",
+			"http://127.0.0.1:3000",
+			"http://172.17.158.148",
+			"https://vonrodinus.github.io",
+
+			"null",
+			"tauri://localhost",
+			"http://tauri.localhost:3000",
+			"http://localhost:8080",
+
+			"chrome-extension://*",
+		}
+
+		allowOrigin := ""
+		if origin != "" {
+			for _, allowed := range allowedOrigins {
+				if origin == allowed {
+					allowOrigin = origin
+					break
+				}
+			}
+		}
+
+		if origin == "" || origin == "null" || r.Header.Get("Sec-Fetch-Site") == "none" {
+
+			allowOrigin = "*"
+
+			w.Header().Set("Access-Control-Allow-Origin", "tauri://localhost")
+		} else if allowOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		} else {
+
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	db.Init()
 
-	// Swagger route
-	http.HandleFunc("/swagger/", httpSwagger.WrapHandler)
+	if err := session.PingRedis(); err != nil {
+		log.Fatal("Redis НЕ РАБОТАЕТ! Запусти: docker start rip-redis")
+	}
+	log.Println("Redis подключён")
 
-	// Existing routes (HTML, add auth if needed, but for SPA focus on API)
-	http.HandleFunc("/", handlers.ArtifactCatalogHandler)
-	http.HandleFunc("/artifact/", handlers.ArtifactDetailHandler)
-	http.HandleFunc("/tpq_request/", handlers.BuildingTPQCalcHandler)
-	http.HandleFunc("/add_artifact/", handlers.AddArtifactToRequestHandler)
-	http.HandleFunc("/delete_request/", handlers.DeleteRequestHandler)
+	mux := http.NewServeMux()
 
-	// API routes
-	http.HandleFunc("/api/artifacts", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/swagger/", httpSwagger.WrapHandler)
+
+	mux.HandleFunc("/", handlers.ArtifactCatalogHandler)
+	mux.HandleFunc("/artifact/", handlers.ArtifactDetailHandler)
+	mux.HandleFunc("/tpq_request/", handlers.BuildingTPQCalcHandler)
+	mux.HandleFunc("/add_artifact/", handlers.AddArtifactToRequestHandler)
+	mux.HandleFunc("/delete_request/", handlers.DeleteRequestHandler)
+
+	// === API РОУТЫ ===
+	mux.HandleFunc("/api/artifacts", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/artifacts" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			handlers.GetArtifacts(w, r)
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			handlers.CreateArtifact(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
 
-	http.HandleFunc("/api/artifacts/", func(w http.ResponseWriter, r *http.Request) {
-		pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/artifacts/"), "/")
-		if len(pathParts) == 0 || (len(pathParts) == 1 && pathParts[0] == "") {
+	mux.HandleFunc("/api/artifacts/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/artifacts/"), "/")
+		if len(parts) == 0 || (len(parts) == 1 && parts[0] == "") {
 			http.NotFound(w, r)
 			return
 		}
-		if len(pathParts) == 1 {
-			// Handle /api/artifacts/{id}
-			if r.Method == http.MethodGet {
+		if len(parts) == 1 {
+			switch r.Method {
+			case http.MethodGet:
 				handlers.GetArtifact(w, r)
-			} else if r.Method == http.MethodPut {
+			case http.MethodPut:
 				handlers.UpdateArtifact(w, r)
-			} else if r.Method == http.MethodDelete {
+			case http.MethodDelete:
 				handlers.DeleteArtifact(w, r)
-			} else {
+			default:
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 			return
 		}
-		// Handle sub-paths like /api/artifacts/{id}/add_to_request or /image
-		subPath := pathParts[1]
-		if subPath == "add_to_request" && r.Method == http.MethodPost {
+		if parts[1] == "add_to_request" && r.Method == http.MethodPost {
 			handlers.AddArtifactToRequest(w, r)
-		} else if subPath == "image" && r.Method == http.MethodPost {
+		} else if parts[1] == "image" && r.Method == http.MethodPost {
 			handlers.UploadArtifactImage(w, r)
 		} else {
 			http.NotFound(w, r)
 		}
 	})
 
-	http.HandleFunc("/api/tpq_requests/cart", handlers.GetCartInfo) // GET
-	http.HandleFunc("/api/tpq_requests", handlers.GetTPQRequests)   // GET list
-	http.HandleFunc("/api/tpq_requests/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/tpq_requests/cart", handlers.GetCartInfo)
+	mux.HandleFunc("/api/tpq_requests", handlers.GetTPQRequests)
+
+	mux.HandleFunc("/api/tpq_requests/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			handlers.GetTPQRequest(w, r)
-		} else if r.Method == http.MethodPut {
-			path := r.URL.Path
-			if strings.HasSuffix(path, "/form") {
+			return
+		}
+
+		if r.Method == http.MethodPut {
+			p := r.URL.Path
+			switch {
+			case strings.HasSuffix(p, "/form"):
 				handlers.FormTPQRequest(w, r)
-			} else if strings.HasSuffix(path, "/complete") {
+			case strings.HasSuffix(p, "/complete"):
 				handlers.CompleteTPQRequest(w, r)
-			} else if strings.HasSuffix(path, "/reject") {
+			case strings.HasSuffix(p, "/reject"):
 				handlers.RejectTPQRequest(w, r)
-			} else if strings.Contains(path, "/items/") {
+			case strings.HasSuffix(p, "/moderate"):
+				handlers.ModerateTPQRequest(w, r)
+			case strings.HasSuffix(p, "/update_result"):
+				handlers.UpdateTPQResult(w, r)
+			case strings.Contains(p, "/items/"):
 				handlers.UpdateTPQRequestItem(w, r)
-			} else {
+			default:
 				handlers.UpdateTPQRequest(w, r)
 			}
-		} else if r.Method == http.MethodDelete {
+			return
+		}
+
+		if r.Method == http.MethodDelete {
 			if strings.Contains(r.URL.Path, "/items/") {
 				handlers.DeleteTPQRequestItem(w, r)
 			} else {
 				handlers.DeleteTPQRequest(w, r)
 			}
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
+
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
-	http.HandleFunc("/api/users/register", handlers.RegisterUser) // POST
-	http.HandleFunc("/api/users/me", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+	mux.HandleFunc("/api/users/register", handlers.RegisterUser)
+	mux.HandleFunc("/api/users/me", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
 			handlers.GetMe(w, r)
-		} else if r.Method == http.MethodPut {
+		case http.MethodPut:
 			handlers.UpdateMe(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	http.HandleFunc("/api/users/login", handlers.Login)   // POST
-	http.HandleFunc("/api/users/logout", handlers.Logout) // POST
+	mux.HandleFunc("/api/users/login", handlers.Login)
+	mux.HandleFunc("/api/users/logout", handlers.Logout)
 
-	fs := http.FileServer(http.Dir("static"))
-	http.Handle("/static/", http.StripPrefix("/static/", fs))
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
 	log.Println("Server starting on :8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("CORS enabled for https://vonrodinus.github.io")
+	log.Fatal(http.ListenAndServe("0.0.0.0:8080", corsMiddleware(mux)))
 }

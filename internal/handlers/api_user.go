@@ -139,7 +139,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	token := session.CreateSession(w, &user)
+	token := session.CreateSession(&user) // ← только один аргумент
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
@@ -151,6 +151,5 @@ func Login(w http.ResponseWriter, r *http.Request) {
 // @Security BearerAuth
 // @Router /api/users/logout [post]
 func Logout(w http.ResponseWriter, r *http.Request) {
-	session.DestroySession(w, r)
-	w.WriteHeader(http.StatusOK)
+	session.Logout(w, r)
 }

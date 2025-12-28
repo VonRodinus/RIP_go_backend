@@ -4,6 +4,7 @@ import (
 	"RIP/internal/db"
 	"RIP/internal/models"
 	"RIP/internal/session"
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -198,41 +199,64 @@ func UpdateTPQRequest(w http.ResponseWriter, r *http.Request) {
 func FormTPQRequest(w http.ResponseWriter, r *http.Request) {
 	sess := session.GetUser(r)
 	if sess == nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
+
 	pathParts := strings.Split(r.URL.Path, "/")
 	if len(pathParts) < 4 {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		http.Error(w, `{"error":"invalid url"}`, http.StatusBadRequest)
 		return
 	}
 	id := pathParts[3]
+
 	var req models.TPQRequest
 	if err := db.DB.Preload("TPQItems").Where("id = ? AND status = ?", id, "draft").First(&req).Error; err != nil {
-		http.Error(w, "Cannot form: not draft", http.StatusBadRequest)
+		http.Error(w, `{"error":"request not found or not draft"}`, http.StatusBadRequest)
 		return
 	}
+
 	if req.CreatorID != sess.UserID {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
+
 	if len(req.TPQItems) == 0 {
-		http.Error(w, "Missing required fields", http.StatusBadRequest)
+		http.Error(w, `{"error":"request is empty"}`, http.StatusBadRequest)
 		return
 	}
+
 	now := time.Now()
 	req.FormedAt = &now
 	req.Status = "formed"
+	req.ModerationStatus = "" // явно очищаем
+	req.ModeratedAt = nil
+
 	if err := db.DB.Save(&req).Error; err != nil {
-		http.Error(w, "Error forming request", http.StatusInternalServerError)
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// go func(requestID string) {
+	// 	payload := map[string]string{"pk": requestID}
+	// 	jsonData, _ := json.Marshal(payload)
+
+	// 	resp, err := http.Post("http://localhost:8001/moderate/", "application/json", bytes.NewBuffer(jsonData))
+	// 	if err != nil {
+	// 		log.Printf("[Moderation] Error calling async service for %s: %v", requestID, err)
+	// 		return
+	// 	}
+	// 	resp.Body.Close()
+	// 	log.Printf("[Moderation] Moderation started for request %s", requestID)
+	// }(req.ID)
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(req)
 }
 
 // CompleteTPQRequest godoc
 // @Summary Complete TPQ request
-// @Description Complete a formed TPQ request (moderator required)
+// @Description Complete a formed TPQ request (moderator required) - starts async calculation
 // @Tags tpq_requests
 // @Produce json
 // @Param id path string true "Request ID"
@@ -252,33 +276,58 @@ func CompleteTPQRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
+
 	pathParts := strings.Split(r.URL.Path, "/")
 	if len(pathParts) < 4 {
 		http.Error(w, "Invalid URL", http.StatusBadRequest)
 		return
 	}
 	id := pathParts[3]
+
 	var req models.TPQRequest
 	if err := db.DB.Preload("TPQItems.Artifact").Where("id = ? AND status = ?", id, "formed").First(&req).Error; err != nil {
 		http.Error(w, "Cannot complete: not formed", http.StatusBadRequest)
 		return
 	}
+
 	moderatorID := sess.UserID
 	req.ModeratorID = &moderatorID
 	now := time.Now()
 	req.CompletedAt = &now
-	req.Status = "completed"
-	var maxTPQ int
-	for _, item := range req.TPQItems {
-		if item.Artifact.TPQ > maxTPQ {
-			maxTPQ = item.Artifact.TPQ
-		}
-	}
-	req.Result = &maxTPQ
+
+	req.Status = "processing"
+	req.ModerationStatus = "pending"
+
+	req.Result = nil
+
 	if err := db.DB.Save(&req).Error; err != nil {
-		http.Error(w, "Error completing request", http.StatusInternalServerError)
+		http.Error(w, "Error updating request", http.StatusInternalServerError)
 		return
 	}
+
+	go func(requestID string) {
+		payload := map[string]string{"pk": requestID}
+		jsonData, _ := json.Marshal(payload)
+
+		log.Printf("[Async Calculation] Starting async calculation for request %s", requestID)
+
+		resp, err := http.Post("http://localhost:8001/moderate/", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Printf("[Async Calculation] Error calling async service for %s: %v", requestID, err)
+
+			var failedReq models.TPQRequest
+			if err := db.DB.First(&failedReq, "id = ?", requestID).Error; err == nil {
+				failedReq.Status = "failed"
+				failedReq.ModerationStatus = "calculation_failed"
+				db.DB.Save(&failedReq)
+			}
+			return
+		}
+		resp.Body.Close()
+		log.Printf("[Async Calculation] Async calculation started for request %s", requestID)
+	}(req.ID)
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(req)
 }
 

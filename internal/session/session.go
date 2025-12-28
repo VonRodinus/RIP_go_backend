@@ -2,14 +2,20 @@ package session
 
 import (
 	"RIP/internal/models"
+	"context"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-redis/redis/v8"
 )
 
-const SecretKey = "your-secret-key" // В продакшене хранить в переменной окружения
+var (
+	secret = []byte("VonRodinus005_SuperSecret_2025")
+	rdb    = redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	ctx    = context.Background()
+)
 
 type UserSession struct {
 	UserID      uint
@@ -22,40 +28,60 @@ type Claims struct {
 	jwt.StandardClaims
 }
 
-func CreateSession(w http.ResponseWriter, user *models.User) string {
-	claims := &Claims{
+func PingRedis() error {
+	_, err := rdb.Ping(ctx).Result()
+	return err
+}
+
+func CreateSession(user *models.User) string {
+	claims := Claims{
 		UserID:      user.ID,
 		IsModerator: user.IsModerator,
 		StandardClaims: jwt.StandardClaims{
 			ExpiresAt: time.Now().Add(24 * time.Hour).Unix(),
-			IssuedAt:  time.Now().Unix(),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(SecretKey))
-	if err != nil {
-		return ""
-	}
-	w.Header().Set("Authorization", "Bearer "+tokenString)
-	return tokenString
+	s, _ := token.SignedString(secret)
+	return s
 }
 
 func GetUser(r *http.Request) *UserSession {
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
 		return nil
 	}
-	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	t := strings.TrimPrefix(h, "Bearer ")
+
+	if ok, _ := rdb.Get(ctx, "bl:"+t).Result(); ok == "1" {
+		return nil
+	}
+
 	claims := &Claims{}
-	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-		return []byte(SecretKey), nil
+	_, err := jwt.ParseWithClaims(t, claims, func(*jwt.Token) (interface{}, error) {
+		return secret, nil
 	})
-	if err != nil || !token.Valid {
+	if err != nil {
 		return nil
 	}
 	return &UserSession{UserID: claims.UserID, IsModerator: claims.IsModerator}
 }
 
-func DestroySession(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Authorization", "")
+func Logout(w http.ResponseWriter, r *http.Request) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		http.Error(w, "no token", 400)
+		return
+	}
+	t := strings.TrimPrefix(h, "Bearer ")
+
+	claims := &Claims{}
+	jwt.ParseWithClaims(t, claims, func(*jwt.Token) (interface{}, error) { return secret, nil })
+	ttl := time.Until(time.Unix(claims.ExpiresAt, 0))
+	if ttl < 0 {
+		ttl = time.Second
+	}
+
+	rdb.Set(ctx, "bl:"+t, "1", ttl)
+	w.Write([]byte(`{"msg":"logged out"}`))
 }
